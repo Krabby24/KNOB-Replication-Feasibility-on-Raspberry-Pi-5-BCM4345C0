@@ -1,7 +1,7 @@
 # KNOB Attack on Raspberry Pi 5 — BCM4345C0
 > CVE-2019-9506 | Bluetooth BR/EDR Key Negotiation Attack  
 > Security of Advanced Networking and Services — Master's Course Project  
-> Authors: **Marco** & **Riccardo Citron**
+> Authors: **Marco Stocco** & **Riccardo Citron**
 
 ---
 
