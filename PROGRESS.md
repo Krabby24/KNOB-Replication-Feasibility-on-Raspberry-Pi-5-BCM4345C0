@@ -25,8 +25,51 @@
 ---
 ```
 
----
+---  
+## Session — 2026-05-17 | Author: Marco
 
+### What we did
+- Disabled BlueZ min key size enforcement: `echo 1 > /sys/kernel/debug/bluetooth/hci0/min_encrypt_key_size`
+- Wrote and tested KNOB_PoC_BCM4345C0.py v1, v2, v3, v4 — progressively improved automation
+- Attempted automatic LMP injection via HCI vendor command `0xfc58` (Broadcom send LMP)
+- Established BR/EDR connections with Windows 11 laptop (A8:59:5F:E6:C8:EA) and JBL Clip 2 (40:EF:4C:8C:88:DF)
+- Captured multiple btmon logs: `knob_test_windows.log`, `knob_jbl_test.log`, `knob_v4_test.log`
+- Analyzed timing of LMP negotiation via btmon logs
+- Researched original KNOB paper PoC methodology
+- Identified BCM4345C0 ROM hardware protection as root cause of injection failure
+
+### What we obtained
+
+**Technical findings:**
+- `0xfc58` vendor command is accepted by BCM4345C0 firmware with `Status: Success` when sent at ~20ms after Connect Complete, but does not affect key size negotiation
+- JBL Clip 2 uses E0 encryption (old, brute-forceable) — confirmed in btmon log (`Encryption: Enabled with E0`)
+- Windows 11 laptop uses AES-CCM — patched against KNOB
+- Timing analysis: encryption established ~113ms after Connect Complete on JBL, ~140ms on Windows laptop
+- `sendlmp` CLI command gives error `0x12` when connection is already in encrypted state
+- Original KNOB paper PoC used Nexus 5 with **custom Android Bluetooth stack** — not Linux/BlueZ. This explains why direct LMP injection is not possible with our setup without kernel modifications
+
+**Root cause identified:**
+BlueZ on Linux manages BR/EDR authentication and encryption autonomously via the management socket layer, faster than any userspace tool can intercept. Without kernel patches or ROM access, LMP injection before encryption setup is not achievable with InternalBlue on RPi 5.
+
+**Viable alternative approach confirmed:**
+Writing `0x01` to `0x204C4F` (key length field at offset `+0xA7` in connection struct) after connection is established successfully changes `Effective Key Len` to 1 byte. This demonstrates the chip does not protect this memory field and allows E0 brute force in Phase 4.
+
+### Limitations encountered
+- `0xfc58` vendor command accepted but ineffective for key negotiation interception
+- LMP injection via `sendlmp` requires connection to be in pre-encryption LMP state — window is ~113ms and BlueZ fills it before InternalBlue can act
+- ROM hardware protection on RPi 5 prevents reading `lm_SendLmpEncryptKeySizeReq` address
+- Original paper PoC methodology not reproducible on Linux/BlueZ without kernel patches
+
+### Compromise vs real attack
+Our approach demonstrates the **effect** of KNOB on BCM4345C0 by modifying the key length field post-connection, rather than intercepting the LMP negotiation (true MitM). This is a limitation imposed by the RPi 5 hardware ROM protection and BlueZ architecture. The finding is still valid: the chip does not protect key length in RAM, and E0 traffic with key=1 is brute-forceable.
+
+### Next step
+- Phase 2 complete: use `writemem 0x204C4F 01 --hex` approach as the PoC
+- Phase 3: connect JBL Clip 2, lower key to 1, generate audio traffic, capture with btmon
+- Phase 4: compile `e0/` module from francozappa/knob, brute force captured traffic
+- Update KNOB_PoC_BCM4345C0.py to reflect writemem approach
+- Update repo with all findings
+  
 ## Session — 2026-05-15 | Author: Marco
 
 ### What we did
