@@ -25,7 +25,62 @@
 ---
 ```
 
----  
+---    
+## Session 2026-05-19 — Phase 3: First Complete Test on JBL Clip 2
+
+### Objective
+Perform the full KNOB attack on JBL Clip 2 (40:EF:4C:8C:88:DF) and verify
+key length reduction to 1 byte.
+
+### Result
+✅ KNOB attack confirmed on JBL Clip 2 — Effective Key Len reduced to 1 byte (8 bit)
+
+---
+
+### Critical Finding: Active Connection Slots vs CONNECTION_ARRAY_ADDRESS
+
+The value `CONNECTION_ARRAY_ADDRESS = 0x204BA8` from `fw_0x6119.py` is correct as
+the array base, but InternalBlue always reports `Array Index: 00` for all connections
+— this is a parser bug for this firmware version. The active JBL connection is not
+necessarily located in slot 0.
+
+### Technique to Find the Correct Memory Slot (JBL Clip 2)
+
+1. Run `info connections` in InternalBlue and note the connection number
+   (e.g. `---05---`, `---01---`) — this changes on every reconnection
+2. Search for the pattern `55 55 55 55` in the first 0x20 bytes of each slot:
+   - Slot N = `0x204BA8 + (N * 0x150)`
+   - Slot 0: `0x204BA8`
+   - Slot 1: `0x204CF8`
+   - Slot 2: `0x204E48`
+   - Slot 3: `0x204F98`
+   - Slot 4: `0x2050E8`
+   - Slot 5: `0x205238`
+3. Verify presence of JBL BD address (`df 88 8c 4c ef 40`) at offset +0x20 of the slot
+4. Key length field is at `slot_base + 0xA7`
+5. Execute `writemem <slot_base + 0xA7> 01 --hex`
+
+### Experimentally Verified Examples
+
+| Session | Connection ID | Slot | key_len_addr | Result |
+|---|---|---|---|---|
+| 1 | ---05--- | 5 | `0x2052DF` | ✅ Key = 1 byte |
+| 2 | ---01--- | 1 | `0x204D9F` | ✅ Key = 1 byte |
+
+### General Formula
+slot_base = 0x204BA8 + (slot_index * 0x150)
+key_len_addr = slot_base + 0xA7
+
+### Operational Notes
+- The connection ID number in InternalBlue does NOT directly correspond to the slot index
+- The correct slot is identified by searching for pattern `55 55 55 55` + JBL BD address
+- The modification is volatile — resets on every disconnection/reboot
+- `min_encrypt_key_size` must be reapplied after every reboot
+
+### Next Steps
+- Test on Samsung Galaxy 2014 (not in the original paper → original contribution)
+- Phase 4: E0 brute force on captured traffic  
+
 ## Session — 2026-05-17 | Author: Marco
 
 ### What we did
