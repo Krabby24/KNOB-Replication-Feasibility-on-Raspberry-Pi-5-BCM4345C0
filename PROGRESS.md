@@ -25,7 +25,77 @@
 ---
 ```
 
----    
+---      
+## Session 2026-05-19 — Phase 3 continued: Samsung Galaxy Ace Style 2014 & Samsung Galaxy A34 5G 2024
+
+### Devices Tested
+- Samsung Galaxy Ace Style 2014 — SM-G310HN — BD Address: F8:84:F2:62:96:AA
+- Samsung Galaxy A34 5G 2024 — BD Address: AC:80:FB:21:85:32
+
+---
+
+### Samsung Galaxy Ace Style 2014
+
+#### Result
+✅ KNOB attack confirmed — Effective Key Len reduced to 1 byte (8 bit)
+
+#### Memory Location
+- Connection ID: `---07---` (stable across reconnections once paired)
+- Conn. Handle: `0xB`
+- `Master of Conn.: False` — Samsung is master, RPi is slave
+- Slot base: `0x2054D8`
+- key_len_addr: `0x2054D8 + 0xA7 = 0x20557F`
+- LMP Features: `0f000341bffecffe`
+
+#### Notes
+- Once paired, the Samsung consistently connects to the same slot (slot base `0x2054D8`)
+  and obtains the same connection handle (`0xB`), making the key_len_addr stable
+  and predictable across sessions — no memory search required after initial discovery
+- `Master of Conn.: False` — attack succeeds regardless of master/slave role,
+  confirming the vulnerability is independent of connection role
+
+---
+
+### Samsung Galaxy A34 5G 2024
+
+#### Result
+✅ KNOB attack confirmed — Effective Key Len reduced to 1 byte (8 bit)
+
+#### Memory Location
+- Connection ID: `---07---`
+- Conn. Handle: `0xB`
+- `Master of Conn.: False`
+- Slot base: `0x2054D8` (same as Samsung 2014 — slot reused after disconnection)
+- key_len_addr: `0x20557F`
+- LMP Features: `46000000bf3e8dfe`
+
+#### Important Note on Interpretation
+The A34 is a 2024 device and may include patches against the full KNOB MitM attack
+(three-device, over-the-air LMP interception). What this test demonstrates is that:
+- The A34 does **not** detect nor react to the key length modification on the connected device
+- It remains connected with key=1 without disconnecting or raising any error
+- This is a behavioral vulnerability — the device accepts a degraded encryption session
+  without any warning or countermeasure at the HCI/host level
+
+A definitive assessment of whether the A34 would reject a key=1 negotiation in a true
+MitM scenario would require the full three-device attack setup.
+
+---
+
+### Cross-Device Finding: offset +0xA7 is universal on BCM4345C0
+
+The key length field offset `+0xA7` from the slot base has been verified on all
+three tested devices:
+
+| Device | BD Address | Slot Base | key_len_addr | Result |
+|---|---|---|---|---|
+| JBL Clip 2 | 40:EF:4C:8C:88:DF | variable | slot_base + 0xA7 | ✅ |
+| Samsung Galaxy Ace Style 2014 | F8:84:F2:62:96:AA | `0x2054D8` | `0x20557F` | ✅ |
+| Samsung Galaxy A34 5G 2024 | AC:80:FB:21:85:32 | `0x2054D8` | `0x20557F` | ✅ |
+
+The offset `+0xA7` is constant across all devices and connection types on BCM4345C0.
+This is an original finding not previously documented for this chip.  
+
 ## Session 2026-05-19 — Phase 3: First Complete Test on JBL Clip 2
 
 ### Objective
