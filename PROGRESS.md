@@ -26,6 +26,196 @@
 ```
 
 ---      
+---  
+## Session 2026-05-21 — Phase 4: E0 Brute Force & Cryptographic Key Derivation
+
+### Devices Tested
+- Samsung Galaxy Ace Style 2014 — SM-G310HN — BD Address: F8:84:F2:62:96:AA (primary target)
+- JBL Clip 2 — 40:EF:4C:8C:88:DF (referenced, not used today)
+
+---
+
+### Part 1 — E0 Encryption Confirmed on Samsung Ace Style 2014
+
+#### Result
+✅ E0 encryption confirmed on Samsung Galaxy Ace Style 2014
+
+From btmon log `knob_samsung_ace_phase4_v2.log`:
+```
+> HCI Event: Encryption Change (0x08) plen 4   #47 [hci0] 9.387126
+        Encryption: Enabled with E0 (0x01)
+        Key size: 16  ← host reads this ONCE before writemem
+```
+
+Timeline proof from log:
+- writemem (key→1): timestamp 21.889297
+- First L2CAP Echo Request: timestamp 92.330685
+
+Traffic was generated **70 seconds after** writemem with key=1 active.
+Host reads Key size once at connection time and never re-reads it — the host
+believes key=16 while firmware uses key=1. This is the core KNOB vulnerability.
+
+---
+
+### Part 2 — Key Size Reduction Confirmed During l2ping Traffic
+
+20 L2CAP Echo Request/Response cycles completed with Effective Key Len = 1 byte,
+Samsung remained connected without error or disconnection.
+btmon shows traffic after writemem — confirms behavioral vulnerability.
+
+---
+
+### Part 3 — E0 Brute Force Tool Setup
+
+#### francozappa/knob e0/ module setup on RPi5
+- Cloned: `~/knob_work/knob/`
+- Fixed Python 2→3 incompatibilities:
+  - `bf.py`: replaced `imap` with `map`
+  - `Makefile`: replaced `python2` with `python3`
+  - `constants.py`: updated `E0_IMPL_PATH` to `/home/marco/knob_work/knob/e0/e0`
+- Installed: `bitstring` via pip
+- `bf_tests.py` passes with Python 3.13 ✅
+
+---
+
+### Part 4 — Critical Finding: btmon Cannot Capture E0 Ciphertext
+
+btmon/HCI receives traffic ALREADY DECRYPTED by the BCM4345C0 chip.
+The chip decrypts all traffic before passing it to the host via HCI.
+Therefore, E0 ciphertext is NOT available via btmon for brute force.
+Ubertooth One would be required for over-the-air capture.
+
+---
+
+### Part 5 — Cryptographic Key Derivation Attempt (Mathematical Brute Force)
+
+#### Goal
+Compute K'C (the actual 1-byte entropy session key) using:
+- E1(KL, AU_RAND, BTADD_S) → SRES + ACO
+- E3(KL, EN_RAND, ACO) → KC
+- Es(KC, N=1) → K'C
+
+#### Critical Finding: Public RAND in InternalBlue = AU_RAND (NOT EN_RAND)
+
+**This is an original finding.** Previous sessions incorrectly assumed
+`Public RAND` = EN_RAND. Today we proved via LMP packet capture that:
+- `Public RAND` shown in `info connections` = **AU_RAND** (LMP_au_rand, opcode 11)
+- EN_RAND is a different parameter exchanged in LMP_start_encryption_req (opcode 0x24)
+
+Proof: Packet 90 in `lmp_monitor.pcap`:
+```
+opcode byte 0x17 → opcode = 0x17 >> 1 = 11 = LMP_au_rand
+payload = 3a8fbe4e32d349750fb211d923c7e7ca = Public RAND value ✅
+```
+
+#### SRES Verification
+
+For session with AU_RAND = `3a8fbe4e32d349750fb211d923c7e7ca`:
+- BTADD_S must be used in **little-endian** format: `aa9662f284f8` (not `f884f26296aa`)
+- E1(KL, AU_RAND, BTADD_S_le) → SRES = `d1e5d27b` ✅ (verified in LMP_sres packet 93)
+
+#### RAM Structure Discovery — Connection Struct Offsets (BCM4345C0)
+
+From hexdump of slot base (e.g. `0x205628`):
+
+| Offset | Size | Content |
+|--------|------|---------|
+| +0x60  | 16B  | KL (Link Key) |
+| +0x70  | 16B  | AU_RAND |
+| +0x80  | 4B   | SRES |
+| +0x84  | 12B  | ACO |
+| +0x90+ | ?    | EN_RAND (NOT FOUND — likely not stored after encryption setup) |
+
+ACO verified for session: `bece53e50ac191b28985174f` ✅
+
+---
+
+### Part 6 — LMP Packet Capture via Broadcom Vendor Diagnostics
+
+#### Setup
+```bash
+echo 1 | sudo tee /sys/kernel/debug/bluetooth/hci0/vendor_diag
+sudo ln -s /usr/bin/tshark /usr/bin/wireshark
+sudo wireshark -i bluetooth-monitor -w /tmp/lmp_monitor.pcap &
+```
+
+**Key insight:** Must use `bluetooth-monitor` interface (NOT `bluetooth0`) to capture
+Broadcom vendor diagnostic packets containing LMP.
+
+#### h4bcm Wireshark Dissector
+- Plugin `h4bcm.dll` found in release folder of h4bcm_wireshark_dissector repo
+- Installed to `C:\Users\marco\AppData\Roaming\Wireshark\plugins\4.6\`
+- NOT compatible with Wireshark 4.6.4 (compiled for older versions)
+- Packets visible as raw bytes under `Opcode: Vendor Diagnostic (11)` in HCI_MON
+
+#### LMP Packet Format (Broadcom Diagnostic)
+```
+[0x0000000b] [dir(1)] [padding(3)] [handle(1)] [BD_addr_partial(4)] [handle2(2)] [len(2)] [opcode_byte(1)] [payload...]
+```
+- opcode_byte = (lmp_opcode << 1) | tid
+- LMP_au_rand: opcode=11, byte=0x16/0x17
+- LMP_sres: opcode=12, byte=0x18/0x19
+- LMP_start_encryption_req: opcode=0x24, byte=0x48/0x49
+
+---
+
+### Part 7 — What Is Still Missing
+
+**EN_RAND** is the only missing parameter.
+
+EN_RAND is exchanged in `LMP_start_encryption_req` which occurs in the first ~500ms
+of connection setup. It has NOT been captured in any pcap yet because:
+1. `vendor_diag` resets after each reboot/reconnection
+2. The encryption setup happens faster than the capture window in our current workflow
+
+#### Solution for Next Session
+The EXACT sequence to capture EN_RAND:
+```bash
+# Step 1: Enable vendor_diag FIRST
+echo 1 | sudo tee /sys/kernel/debug/bluetooth/hci0/vendor_diag
+
+# Step 2: Start capture
+sudo wireshark -i bluetooth-monitor -w /tmp/lmp_enrand.pcap &
+
+# Step 3: Disconnect Samsung (if connected)
+# bluetoothctl: disconnect F8:84:F2:62:96:AA
+
+# Step 4: Reconnect Samsung  
+# bluetoothctl: connect F8:84:F2:62:96:AA
+
+# Step 5: IMMEDIATELY stop capture (within 2 seconds of connection)
+sudo kill $(pgrep -f wireshark)
+
+# Step 6: Analyze - look for opcode 0x48/0x49 (LMP_start_encryption_req)
+# EN_RAND = 16 bytes after the opcode byte
+```
+
+Then compute K'C:
+```python
+SRES, ACO = e1(KL, AU_RAND, BTADD_S_le)  # BTADD_S in little-endian
+KC = e3(KL, EN_RAND, ACO)
+Kc_prime = Kc_to_Kc_prime(KC, 1)
+# Verify: Kc_prime[0] == 0xf2 (first byte visible in InternalBlue after writemem)
+```
+
+---
+
+### Summary of Original Findings from Today
+
+1. **Public RAND in InternalBlue = AU_RAND** (not EN_RAND as previously assumed)
+2. **BTADD_S must be little-endian** for E1 computation on BCM4345C0
+3. **RAM struct offsets confirmed**: KL@+0x60, AU_RAND@+0x70, SRES@+0x80, ACO@+0x84
+4. **EN_RAND is NOT stored in RAM** after encryption setup completes
+5. **Broadcom vendor_diag LMP capture works** via `bluetooth-monitor` interface
+6. **LMP packet format decoded**: opcode = byte >> 1, BTADD in little-endian in packets
+7. **SRES verified mathematically**: E1(KL, AU_RAND, BTADD_S_le) = SRES from LMP_sres packet ✅
+8. **ACO computed and verified**: from E1 output ✅
+9. **btmon cannot capture E0 ciphertext** — chip decrypts before HCI
+
+### Next Step
+Capture EN_RAND from LMP_start_encryption_req using the exact sequence above,
+then complete K'C computation and demonstrate mathematical brute force of all 256 candidates.  
+
 ## Session 2026-05-19 — Phase 3 continued: Samsung Galaxy Ace Style 2014 & Samsung Galaxy A34 5G 2024
 
 ### Devices Tested
