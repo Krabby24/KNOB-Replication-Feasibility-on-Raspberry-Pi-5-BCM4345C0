@@ -69,7 +69,7 @@ knob-attack-rpi5/
 - **Remaining:** complete K'C derivation using synthetic EN_RAND (following KNOB paper methodology, Section 4.3); generate all 256 K'C candidates for brute force demonstration
 
 ### Phase 5 — Original Contributions ✅ SUBSTANTIALLY COMPLETED
-- Extended vulnerability table: 5 devices including **iPhone 16 Pro (2024)** and **MacBook 2022** — not in original KNOB paper
+- Extended vulnerability table: 5 devices including **iPhone 16 Pro (2024)**, **MacBook 2022** and **iPad A16 2026**— not in original KNOB paper
 - BCM4345C0 RAM map fully documented with cryptographic proof
 - EN_RAND non-extractability documented as security finding
 - AES-CCM vulnerability confirmed on modern Apple devices
