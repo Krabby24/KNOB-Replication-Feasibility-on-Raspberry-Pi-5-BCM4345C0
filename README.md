@@ -90,6 +90,7 @@ knob-attack-rpi5/
 | iPhone 6S | 00:B3:62:93:89:12 | E0 | ✅ | `0x2056CF` | Slave | slot 1 |
 | **iPhone 16 Pro (2024)** | 90:B7:90:09:34:92 | AES-CCM | ✅ | `0x20557F` | Slave | **Secure Connections — original finding** |
 | **MacBook 2022** | a8:8f:d9:35:0c:fe | AES-CCM | ✅ | `0x20557F` | Slave | **Secure Connections — original finding** |
+| **iPad A16 (iPadOS 26)** | 30:C0:AE:2D:B4:BE | AES-CCM | ✅ | 0x20557F | Slave | **Secure Connections - original finding** |
 
 ---
 
