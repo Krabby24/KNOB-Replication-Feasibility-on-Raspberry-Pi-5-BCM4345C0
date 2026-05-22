@@ -102,6 +102,8 @@ The `+0xA7` offset for the `effective_key_len` field in the BCM4345C0 connection
 | JBL Clip 2 | E0 | +0xA7 | ✅ |
 | iPhone 6S | E0 | +0xA7 | ✅ |
 | iPhone 16 Pro | AES-CCM | +0xA7 | ✅ |
+| MacBook Air M2 2022 | AES-CCM | +0xA7 | ✅ |
+| iPad A16 (iPadOS 26) | AES-CCM | +0xA7 | ✅ |  
 
 Independent of: encryption type, master/slave role, iOS/Android version, device year.
 
@@ -115,8 +117,9 @@ Independent of: encryption type, master/slave role, iOS/Android version, device 
 | Samsung Galaxy Ace Style 2014 | F8:84:F2:62:96:AA | E0 | ✅ | 0x20557F | Slave | stable slot, stable KL |
 | Samsung Galaxy A34 5G 2024 | AC:80:FB:21:85:32 | E0 | ✅ | 0x20557F | Slave | stable slot |
 | iPhone 6S | 00:B3:62:93:89:12 | E0 | ✅ | 0x2056CF | Slave | slot 1, KL=`877779624ab464c66a93c4092608b255` |
-| iPhone 16 Pro 2024 | 90:B7:90:09:34:92 | AES-CCM | ✅ | 0x20557F | Slave | Secure Connections, slot 0 |
+| iPhone 16 Pro 2024 | 90:B7:90:09:34:92 | AES-CCM | ✅ | 0x20557F | Slave | Secure Connections, slot 7 |
 | MacBook Air M2 2022 | A8:8F:D9:35:0C:FE | AES-CCM | ✅ | 0x20557F | Slave | Secure Connections |
+| iPad A16 (iPadOS 26) | 30:C0:AE:2D:B4:BE | AES-CCM | ✅ | 0x20557F | Slave | Secure Connections |
 
 ---
 
