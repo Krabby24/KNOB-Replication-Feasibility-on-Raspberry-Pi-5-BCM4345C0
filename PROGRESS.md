@@ -28,7 +28,7 @@
 ---      
 ---  
 
-## 2026-05-21 — Session Marco + Riccardo Citron
+## 2026-05-21 — Session Marco Stocco + Riccardo Citron
 
 ### Session Objective
 Complete Phase 4 of the project: derive the session key K'C with 1 byte of entropy from the real cryptographic parameters captured during the KNOB attack on the Samsung Galaxy Ace Style 2014. In parallel, extend vulnerability testing to new Apple devices with Riccardo Citron.
