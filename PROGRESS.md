@@ -28,6 +28,973 @@
 ---      
 ---  
 
+## 2026-05-23 — Session
+
+# KNOB Attack on Raspberry Pi 5 / BCM4345C0: Research Session Report
+
+## 1. Starting Point
+
+The goal of today’s session was to determine whether our current Raspberry Pi 5 setup can perform a real KNOB downgrade on a Bluetooth BR/EDR connection, i.e. reduce the actual encryption-key entropy from 16 bytes to 1 byte.
+
+The target setup is:
+
+```text
+Attack platform: Raspberry Pi 5
+Bluetooth chip: Cypress CYW43455 / BCM4345C0
+Firmware family: chip id 0x6119
+Framework: InternalBlue
+Main target device: Samsung Galaxy Ace Style 2014
+Target BD_ADDR: F8:84:F2:62:96:AA
+```
+
+The theoretical KNOB attack requires the devices to negotiate a small entropy value `N` during the LMP encryption key size negotiation. In the real attack, both controllers must compute the final encryption key `K'C = Es(KC, N)` using `N = 1`. Merely changing what the host or HCI reports after encryption is already active is not sufficient. The original KNOB paper is explicit that the entropy negotiation happens between Bluetooth controllers over LMP, that the host is not directly involved, and that the attacker must change the negotiated entropy before both controllers compute and use `K'C`. 
+
+The core research question for today was therefore:
+
+> Is the field `connection_struct + 0xA7` the real input used by firmware to set encryption entropy, or is it only an output/reporting field?
+
+This became the central turning point of the session.
+
+---
+
+## 2. The Original Assumption About `+0xA7`
+
+Before today’s deeper tests, we had mapped the BCM4345C0 connection structure and identified the following relevant fields:
+
+```text
+connection_array_base = 0x204BA8
+connection_struct_size = 0x150
+effective_key_len offset = +0xA7
+```
+
+For Samsung in slot 7:
+
+```text
+key_len_addr = 0x204BA8 + 7 * 0x150 + 0xA7
+             = 0x20557F
+```
+
+Earlier RAM analysis had shown that `+0xA7` contained the value displayed by InternalBlue as:
+
+```text
+Effective Key Len: 16 byte
+```
+
+Writing:
+
+```text
+writemem 0x20557F 01
+```
+
+made InternalBlue display:
+
+```text
+Effective Key Len: 1 byte
+```
+
+Initially this looked like a successful KNOB downgrade. The hypothesis was:
+
+```text
+firmware reads +0xA7
+        ↓
+uses this value as N
+        ↓
+computes K'C with that entropy
+        ↓
+link encryption becomes weak
+```
+
+Today we tested that assumption directly.
+
+---
+
+## 3. Why `+0xA7` Is Not the Real Input
+
+### 3.1 Post-encryption write to `+0xA7`
+
+We first established a normal encrypted BR/EDR connection to the Samsung phone. InternalBlue showed:
+
+```text
+Remote BT address: f8:84:f2:62:96:aa
+Conn. Handle: 0xB
+Effective Key Len: 16 byte
+Link Key: 03359eaafa82f88792ea2d7b2d3a003d
+```
+
+Then we wrote:
+
+```text
+writemem 0x20557F 01
+```
+
+After this write, InternalBlue showed:
+
+```text
+Effective Key Len: 1 byte
+Link Key: 03
+```
+
+The fact that the Link Key display became only `03` is important. It strongly suggests that InternalBlue uses the effective key length field to decide how many bytes to print, rather than showing evidence that the real link key changed.
+
+Then we queried the standard HCI command:
+
+```bash
+sudo hcitool cmd 0x05 0x0008 0B 00
+```
+
+The controller returned:
+
+```text
+01 08 14 00 0B 00 01
+```
+
+Decoded:
+
+```text
+status = 0x00 success
+handle = 0x000B
+reported key size = 0x01
+```
+
+So both InternalBlue and HCI reported 1 byte.
+
+However, this write happened after encryption was already active. At that point, `K'C` should already have been computed. If this write had changed the actual live encryption key only on the RPi side, the Samsung would still be using the old key and the encrypted link should break.
+
+It did not.
+
+---
+
+### 3.2 L2CAP traffic continued after changing `+0xA7`
+
+We used `l2ping` to generate real Bluetooth L2CAP traffic over the encrypted link.
+
+After setting `+0xA7` to `0x01`, the connection continued to exchange L2CAP Echo Requests and Echo Responses. This means the encrypted link remained functional after the reported key size was modified.
+
+This is a strong indication that the active encryption key was not changed by the post-encryption RAM write.
+
+The reasoning is:
+
+```text
+If +0xA7 changed the live cryptographic key only on RPi:
+    RPi would encrypt/decrypt with a different key
+    Samsung would still use the original key
+    L2CAP traffic should fail
+
+Observed:
+    L2CAP traffic continued
+
+Conclusion:
+    +0xA7 does not control the already-active encryption key
+```
+
+The btmon log confirms that L2CAP Echo Response packets continued while `HCI Read Encryption Key Size` reported key size 0 in a later invalid-value test, showing that the link remained alive even when the reported key size was nonsensical. 
+
+---
+
+### 3.3 Invalid values: `0x00` and `0xff`
+
+The decisive tests were the invalid-value experiments.
+
+We wrote:
+
+```text
+writemem 0x20557F ff
+```
+
+InternalBlue then reported:
+
+```text
+Effective Key Len: 255 byte (2040 bit)
+```
+
+and `HCI Read Encryption Key Size` returned:
+
+```text
+... 0B 00 FF
+```
+
+This is impossible as a real Bluetooth encryption key size. BR/EDR key entropy is negotiated between 1 and 16 bytes. A reported value of `0xff` cannot represent a valid negotiated key size.
+
+Then we wrote:
+
+```text
+writemem 0x20557F 00
+```
+
+InternalBlue reported:
+
+```text
+Effective Key Len: 0 byte
+```
+
+and HCI returned:
+
+```text
+... 0B 00 00
+```
+
+The connection remained stable, and L2CAP traffic continued.
+
+This is the crucial proof:
+
+> The controller’s HCI `Read Encryption Key Size` response is reading a mutable RAM field, not verifying the real cryptographic entropy of the active link.
+
+Therefore:
+
+```text
+HCI reports 1
+≠ proof that KNOB succeeded
+```
+
+This is one of the most important findings of the project.
+
+---
+
+### 3.4 Final conclusion on `+0xA7`
+
+We now classify:
+
+```text
++0xA7 = reported/effective key size state field
+```
+
+not:
+
+```text
++0xA7 = input variable used to construct LMP_encryption_key_size_req
+```
+
+More precisely:
+
+```text
++0xA7 is an output/reporting field written by firmware and read by:
+    - InternalBlue info connections
+    - HCI Read Encryption Key Size
+```
+
+It can be forged after negotiation. It does not prove that the negotiated LMP entropy was reduced.
+
+A correct report statement would be:
+
+> On BCM4345C0/RPi5, the connection-structure field at offset `+0xA7` controls the key size reported to InternalBlue and to the standard HCI `Read Encryption Key Size` command. However, writing arbitrary values to this byte after encryption is enabled does not immediately disrupt encrypted L2CAP traffic, even for invalid values such as `0x00`. Therefore, `HCI Read Encryption Key Size` alone is insufficient evidence of a successful KNOB downgrade on this platform.
+
+This finding invalidates the earlier interpretation that the tested devices were confirmed vulnerable. With the evidence available today, we have not yet proven that the Samsung, JBL, iPhones, or iPad actually accepted `N = 1`. We proved that the RPi controller-side reported key size can be forged.
+
+---
+
+## 4. Updated Experimental Model
+
+After the `+0xA7` result, we adopted a stricter model:
+
+```text
+unknown upstream source
+        ↓
+firmware builds / accepts LMP_encryption_key_size_req
+        ↓
+LMP negotiation determines N
+        ↓
+firmware computes K'C = Es(KC, N)
+        ↓
+firmware writes final/reported N into +0xA7
+        ↓
+InternalBlue and HCI report that value
+```
+
+Therefore, to perform real KNOB, we must influence something upstream of `+0xA7`, ideally one of:
+
+```text
+local_max_key_size
+local_min_key_size
+preferred_key_size
+proposed_key_size
+pending_negotiated_key_size
+LMP TX buffer containing encryption_key_size_req
+```
+
+The Nexus 6P KNOB PoC used a RAM variable at `0x204147` on BCM4358A3. Our question became whether BCM4345C0 has an equivalent RAM variable. The existing project prompt already identified this as the key unresolved question. 
+
+---
+
+## 5. RAM Snapshot Work
+
+### 5.1 Why `dumpmem` was not usable
+
+We attempted to use InternalBlue `dumpmem`, but the command tried to create a template and read ROM sections:
+
+```text
+No template found. Need to read ROM sections as well!
+```
+
+This is incompatible with the RPi5/BCM4345C0 setup, where ROM reads fail or hang. This reinforced one of the earlier platform limitations:
+
+```text
+ROM is not readable
+patchRom is unavailable
+LMP monitor hooks are unavailable
+dumpmem is unreliable because it tries to include ROM
+```
+
+The uploaded project notes already identify the relevant accessible RAM regions and the fact that ROM access on RPi5 is unavailable. 
+
+### 5.2 Controlled hexdump snapshot
+
+We switched to controlled `hexdump` snapshots of reliably readable RAM:
+
+```text
+0x000D0000 - 0x000D8000
+0x00200000 - 0x00228000
+```
+
+Other nominal RAM regions such as:
+
+```text
+0x00260000
+0x00280000
+0x00318000
+```
+
+caused InternalBlue hexdump to hang, so they were excluded from the clean snapshot.
+
+The final clean pre/post snapshot covered:
+
+```text
+196608 bytes
+```
+
+The parsed result was:
+
+```text
+bytes PRE  : 196608
+bytes POST : 196608
+common     : 196608
+changed    : 1929
+changed groups: 417
+```
+
+This gave us a valid, comparable pre/post memory diff.
+
+---
+
+## 6. Dynamic Candidates: Bytes That Became `0x10`
+
+From the clean pre/post diff, we identified addresses that changed to `0x10` after connection establishment. These included:
+
+```text
+0x2002A8
+0x2002CC
+0x20557F
+0x205590
+0x206484
+0x20649C
+0x20F7A6
+0x219190
+0x219192
+0x21C181
+0x21C5A5
+0x21D66E
+0x21D675
+0x21DEFD
+```
+
+The known `+0xA7` field was among them:
+
+```text
+0x20557F
+```
+
+which confirmed that the diff was meaningful.
+
+We then inspected and tested several candidates.
+
+### 6.1 `0x2002A8` and `0x2002CC`
+
+These were initially thought to be candidates because they became `0x10` post-connection.
+
+However, in the pre-connection state they contained `0x0A`, and attempts to write `0x01` did not persist. The value either remained `0x0A` or was immediately restored.
+
+Classification:
+
+```text
+0x2002A8 → write not persistent / not testable with simple writemem
+0x2002CC → write not persistent / not testable with simple writemem
+```
+
+### 6.2 `0x206484`
+
+This address was zero before connection. We wrote:
+
+```text
+writemem 0x206484 01
+```
+
+The write persisted before and after connection. However, Samsung still connected with:
+
+```text
+Effective Key Len: 16 byte
+HCI Read Encryption Key Size: 0x10
+```
+
+Classification:
+
+```text
+0x206484 → writable, persistent, no effect on N
+```
+
+### 6.3 `0x219190` and `0x219192`
+
+Context inspection showed:
+
+```text
+0x219190: 28 56 20 00
+```
+
+which is a little-endian pointer:
+
+```text
+0x00205628
+```
+
+Therefore these were not safe entropy candidates.
+
+Classification:
+
+```text
+0x219190 → pointer field, discarded
+0x219192 → part of same pointer, discarded
+```
+
+### 6.4 `0x21D66E` and `0x21D675`
+
+Context inspection showed SDP/L2CAP-like data patterns:
+
+```text
+35 xx
+19 11 xx
+09 xx xx
+```
+
+These are typical of Bluetooth SDP records and not LMP key-size negotiation fields.
+
+Classification:
+
+```text
+0x21D66E → buffer / protocol data, discarded
+0x21D675 → buffer / protocol data, discarded
+```
+
+---
+
+## 7. Static Candidates: Stable `0x10` Fields
+
+The dynamic candidate set did not reveal the upstream variable. We then considered that the true input might be stable at `0x10` both before and after connection, so it would not appear in a pre/post diff.
+
+A first naive byte-level search produced many false positives, including bytes inside:
+
+```text
+0x00001000
+pointers
+SDP buffers
+DRHT structures
+literal pools / code-like regions
+```
+
+We improved the filter by looking for aligned values:
+
+```text
+u32 == 0x00000010
+u16 == 0x0010
+```
+
+The cleaner report found:
+
+```text
+stable aligned u32 == 0x10: 9
+stable aligned u16 == 0x10: 26
+```
+
+The top u32 candidates included:
+
+```text
+0x200704
+0x201858
+0x201968
+0x201A5C
+0x201FE8
+0x20360C
+0x203660
+0x20AA90
+0x20F75C
+```
+
+The cleaned candidate list is documented in the uploaded report. 
+
+---
+
+## 8. Static Candidate Tests
+
+### 8.1 `0x20EBC0 / 0x20EBC2`
+
+This became the most interesting intermediate structure.
+
+Initial state:
+
+```text
+0x20EBC0: 10 00 10 00
+```
+
+This means two adjacent u16 values:
+
+```text
+0x20EBC0 = 0x0010
+0x20EBC2 = 0x0010
+```
+
+We first wrote:
+
+```text
+writemem 0x20EBC0 01
+```
+
+In one early test, both fields appeared to become:
+
+```text
+01 00 01 00
+```
+
+This initially suggested coupling between the two fields.
+
+However, a later ordered characterization showed a different and more reliable behavior:
+
+```text
+write 00 → 00 00 10 00
+write 01 → 01 00 10 00
+write 02 → 02 00 10 00
+...
+write 0F → 0F 00 10 00
+write 10 → 10 00 10 00
+write 11 → 11 00 10 00
+write FF → FF 00 10 00
+```
+
+Therefore, the corrected interpretation is:
+
+```text
+0x20EBC0 = freely writable field
+0x20EBC2 = stable 0x0010 field
+```
+
+When we wrote `0x20EBC2 = 0x01` before connection, the connection succeeded but the field was restored to `0x0010` during connection establishment, and Samsung still negotiated:
+
+```text
+Effective Key Len: 16 byte
+```
+
+Classification:
+
+```text
+0x20EBC0 → writable field, no evidence that it controls N
+0x20EBC2 → more interesting intermediate field, but firmware restores it to 0x10 during connection
+```
+
+This area remains useful as a timing sensor, but not as a confirmed input.
+
+### 8.2 `0x201FE8`
+
+Context showed:
+
+```text
+30 bf 00 bf 00 bf 70 47 ...
+```
+
+This resembles Thumb code or a literal pool. When writing `0x01`, the value did not become `0x01`; it became `0x68`.
+
+Classification:
+
+```text
+0x201FE8 → not controllable / likely code or literal-pool-adjacent
+```
+
+### 8.3 `0x20360C`
+
+Context:
+
+```text
+02 00 00 00
+04 00 00 00
+08 00 00 00
+10 00 00 00
+```
+
+This looked promising as a clean table of numeric values.
+
+We wrote:
+
+```text
+writemem 0x20360C 01
+```
+
+The value persisted after connection:
+
+```text
+0x20360C = 01 00 00 00
+```
+
+However:
+
+```text
+0x20EBC0/C2 = 10 00 10 00
+Effective Key Len = 16 byte
+```
+
+Classification:
+
+```text
+0x20360C → writable, persistent, no effect on N
+```
+
+### 8.4 `0x208A64`
+
+This field was inside a structure containing pointers and `"DRHT"`-like metadata nearby. Writing:
+
+```text
+0x208A64 = 01
+```
+
+prevented Bluetooth connection. Writing:
+
+```text
+0x208A64 = 08
+```
+
+also broke the controller badly enough that a reboot was required.
+
+Classification:
+
+```text
+0x208A64 → connection-critical structural field, unsafe to modify
+```
+
+### 8.5 `0x20A135 / 0x20A14D / 0x20A165 / 0x20A17D`
+
+These initially appeared as stable `0x10` byte candidates. Context inspection showed they were actually bytes inside aligned values:
+
+```text
+00 10 00 00 = 0x00001000
+```
+
+These likely represent buffer sizes or offsets, not key sizes.
+
+Classification:
+
+```text
+0x20A135, 0x20A14D, 0x20A165, 0x20A17D
+→ discarded as 0x1000 fields, not 16-byte entropy fields
+```
+
+### 8.6 `0x200704`
+
+This was a clean aligned u32 candidate.
+
+We wrote:
+
+```text
+writemem 0x200704 01
+```
+
+The value persisted before and after connection:
+
+```text
+0x200704 = 01 00 00 00
+```
+
+But Samsung still connected with:
+
+```text
+Effective Key Len: 16 byte
+0x20EBC0/C2 = 10 00 10 00
+```
+
+Classification:
+
+```text
+0x200704 → writable, persistent, no effect on N
+```
+
+### 8.7 `0x201858`
+
+This candidate was also tested and produced no useful effect.
+
+Classification:
+
+```text
+0x201858 → no effect on N
+```
+
+---
+
+## 9. Current Candidate Status
+
+The current state of the candidate search is:
+
+```text
++0xA7 / 0x20557F
+    → confirmed reporting/output field
+    → not real input
+
+0x2002A8
+    → write not persistent
+
+0x2002CC
+    → write not persistent
+
+0x206484
+    → writable, persistent, no effect
+
+0x219190 / 0x219192
+    → pointer, discarded
+
+0x21D66E / 0x21D675
+    → SDP/L2CAP buffer, discarded
+
+0x20EBC0
+    → writable field, likely not key-size input
+
+0x20EBC2
+    → intermediate 0x0010 field
+    → restored to 0x10 during connection
+    → still interesting as timing sensor
+
+0x201FE8
+    → code/literal-pool-like, not controllable
+
+0x20360C
+    → writable, persistent, no effect
+
+0x208A64
+    → connection-critical; writing 1 or 8 breaks connection
+
+0x20A135 / 0x20A14D / 0x20A165 / 0x20A17D
+    → actually 0x00001000 fields, discarded
+
+0x200704
+    → writable, persistent, no effect
+
+0x201858
+    → no effect
+```
+
+Still to inspect/test carefully:
+
+```text
+0x203660
+0x20F75C
+0x210D1C / 0x210D1E
+possibly 0x20EBC2 timing behavior
+```
+
+---
+
+## 10. Important btmon Timing
+
+A btmon trace during connection showed:
+
+```text
+Connect Complete:       t = 110.677284
+Encryption Change:      t = 110.781149
+```
+
+So the time between connection completion and encryption becoming active was approximately:
+
+```text
+104 ms
+```
+
+This matters because any race-style `writeMem` approach must occur before the firmware computes or loads the final encryption key. This window is narrow and may be too short for reliable HCI-based memory writes.
+
+---
+
+## 11. What We Have Demonstrated Today
+
+### 11.1 Strong findings
+
+We demonstrated:
+
+```text
+1. +0xA7 is not sufficient to perform KNOB.
+2. +0xA7 controls reported key size, not proven cryptographic entropy.
+3. HCI Read Encryption Key Size can be forged by RAM write.
+4. Invalid HCI key sizes such as 0x00 and 0xff can be reported.
+5. L2CAP traffic can continue while HCI reports impossible key sizes.
+6. Several plausible RAM candidates do not affect negotiation.
+7. Some fields are structural and can break the controller.
+8. 0x20EBC2 is an interesting intermediate field but is restored to 16 during connection.
+```
+
+The most important conceptual result is:
+
+> A reported key size of 1 byte is not sufficient evidence of a real KNOB downgrade when the attacker has RAM write access to the controller.
+
+This is the main scientific turning point of today’s work.
+
+### 11.2 What we have not demonstrated
+
+We have not yet demonstrated:
+
+```text
+1. that the Samsung accepted LMP N = 1;
+2. that any tested device computed K'C with 1 byte of entropy;
+3. that encrypted traffic can be brute-forced in 256 attempts;
+4. that we can modify the real LMP encryption_key_size_req packet;
+5. that we have found the BCM4345C0 equivalent of Nexus 6P's 0x204147.
+```
+
+Therefore, we should not currently claim:
+
+```text
+"KNOB confirmed on Samsung / JBL / iPhone / iPad"
+```
+
+The correct claim is:
+
+```text
+"The RPi5/BCM4345C0 controller-side reported key size can be modified to arbitrary values, including 1, 0, and 255, but this does not by itself prove a real KNOB downgrade."
+```
+
+---
+
+## 12. Remaining Work
+
+The next steps should be:
+
+### 12.1 Finish the clean static-candidate tests
+
+Still inspect/test carefully:
+
+```text
+0x203660
+0x20F75C
+0x210D1C / 0x210D1E
+```
+
+Avoid:
+
+```text
+pointers
+DRHT structures
+SDP/L2CAP buffers
+fields that caused reboot
+```
+
+### 12.2 Characterize `0x20EBC2` timing
+
+The most informative next experiment is to poll:
+
+```text
+0x20EBC0 / 0x20EBC2
+```
+
+during connection establishment after setting:
+
+```text
+0x20EBC2 = 0x01
+```
+
+Goal:
+
+```text
+observe exactly when it returns to 0x10
+```
+
+If it returns to `0x10` well before `Encryption Change`, we may test whether a race-write after restoration can affect the negotiation.
+
+If it returns to `0x10` immediately or atomically with LMP negotiation, HCI-based `writemem` is probably too slow.
+
+### 12.3 Look for transient buffers
+
+Static pre/post snapshots may miss variables that exist only briefly. The real source may be:
+
+```text
+temporary stack variable
+LMP TX buffer
+runtime connection negotiation struct
+ROM constant copied just-in-time
+```
+
+Therefore, a future strategy should involve high-frequency polling of selected RAM areas during:
+
+```text
+Connect Complete
+→ authentication
+→ encryption setup
+→ Encryption Change
+```
+
+### 12.4 Consider HCD / patchram reverse engineering
+
+If RAM-variable search fails, the next serious path is static reverse engineering:
+
+```text
+extract HCD patchram
+parse patchram table
+identify ROM patch targets
+compare with similar Broadcom/Cypress chips
+try function matching with known KNOB PoC targets
+```
+
+This may be the only way to recover LMP-related hook points without a ROM dump.
+
+---
+
+## 13. Current Research Interpretation
+
+At the end of today’s session, our best model is:
+
+```text
+true source of N is still unknown
+        ↓
+firmware initializes intermediate runtime fields such as 0x20EBC2 to 16
+        ↓
+firmware performs LMP entropy negotiation
+        ↓
+firmware computes K'C using negotiated N
+        ↓
+firmware writes final/reported value into connection_struct + 0xA7
+        ↓
+HCI/InternalBlue report that value
+```
+
+The source is probably not a simple static RAM byte among the candidates tested so far. It may be:
+
+```text
+a ROM constant
+a transient stack/local variable
+a short-lived LMP packet buffer
+a runtime field outside the reliably dumpable RAM regions
+a structure initialized too late for pre-connection writemem
+```
+
+---
+
+## 14. Suggested Report Claim
+
+A safe and strong claim for the repository/report is:
+
+> We initially identified `connection_struct + 0xA7` as the field controlling the key size displayed by InternalBlue. However, controlled experiments showed that this field is not sufficient to prove or perform a real KNOB downgrade. After overwriting it post-negotiation, both InternalBlue and the standard HCI `Read Encryption Key Size` command report arbitrary values, including invalid sizes such as `0x00` and `0xff`, while encrypted L2CAP traffic remains functional. Therefore, on BCM4345C0/RPi5, the HCI-reported key size can be forged through controller RAM modification and cannot be used alone as evidence that the actual link-layer encryption key entropy was reduced.
+
+A second safe claim is:
+
+> We performed a systematic RAM search for an upstream BCM4345C0 variable equivalent to the Nexus 6P KNOB PoC RAM variable. Several dynamic and static candidates were tested. None of the tested candidates successfully forced a final negotiated key size of 1 byte. Some fields were writable but had no effect, while others were structural and caused connection failure. The most interesting intermediate field found so far is `0x20EBC2`, which stores `0x0010` and is restored by firmware during connection establishment.
+
+Final status:
+
+```text
+Real KNOB not yet achieved.
+False-positive KNOB evidence disproven.
+Firmware/reporting behavior mapped more accurately.
+Search for upstream source still open.
+```
+  
+
 ## 2026-05-21 — Session Marco Stocco + Riccardo Citron
 
 ### Session Objective
