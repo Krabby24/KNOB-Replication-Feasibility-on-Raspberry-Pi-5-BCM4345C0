@@ -28,6 +28,780 @@
 ---      
 ---  
 
+  
+# 2026-05-25 — Session
+
+## 1. Session objective
+
+The objective of this session was to perform a definitive validation of the current Raspberry Pi 5 / BCM4345C0 KNOB method.
+
+Until the previous session, the main experimental result was that modifying the connection-structure field at offset `+0xA7` changed the value displayed by InternalBlue as:
+
+```text
+Effective Key Len
+````
+
+and also changed the value returned by the standard HCI command:
+
+```bash
+hcitool cmd 0x05 0x0008 <handle_lsb> <handle_msb>
+```
+
+At first, this looked like a successful KNOB downgrade because after writing `0x01` into `+0xA7`, both InternalBlue and HCI could report a key size of 1 byte.
+
+However, the key question for today was:
+
+> Does modifying `+0xA7` really change the negotiated Bluetooth encryption entropy `N`, or does it only modify a reporting/output field after encryption has already been established?
+
+The goal was therefore to verify whether the current method can still be considered a real KNOB attack, or whether it must be reclassified as a false-positive reporting manipulation.
+
+---
+
+## 2. Theoretical reference point
+
+A real KNOB attack requires the attacker to influence the value `N` used during the Bluetooth BR/EDR encryption key size negotiation.
+
+The important theoretical chain is:
+
+```text
+LMP key size negotiation
+        ↓
+N is selected
+        ↓
+KC is reduced through Es(KC, N)
+        ↓
+K'C is used as the actual E0 encryption key
+        ↓
+encrypted traffic uses the weakened key
+```
+
+Therefore, for a real KNOB attack, the downgrade must happen **before** or **during** the LMP encryption setup.
+
+A post-encryption modification of a RAM field that only changes what HCI reports is not enough.
+
+The crucial distinction is:
+
+```text
+HCI/InternalBlue reports key size = 1
+```
+
+does **not necessarily imply**:
+
+```text
+LMP negotiated N = 1
+```
+
+or:
+
+```text
+the active E0 encryption key was derived with 1 byte of entropy
+```
+
+Today’s session focused exactly on proving or disproving this distinction experimentally.
+
+---
+
+## 3. Setup used in this session
+
+The experimental setup was:
+
+```text
+Attack platform: Raspberry Pi 5
+Bluetooth controller: BCM4345C0 / CYW43455 family
+Framework: InternalBlue
+Target device: Samsung Galaxy Ace Style 2014
+Target BD_ADDR: F8:84:F2:62:96:AA
+Windows tools: adb, Wireshark/tshark
+Samsung setting: Bluetooth HCI snoop log enabled
+RPi tools: btmon, hcitool, l2ping, InternalBlue
+```
+
+The Samsung target had Developer Options enabled, including Bluetooth HCI snoop logging.
+
+ADB on Windows was verified successfully:
+
+```powershell
+.\adb.exe devices
+```
+
+Output:
+
+```text
+List of devices attached
+4203adaecc058100        device
+```
+
+So the Samsung was correctly connected and authorized for ADB.
+
+---
+
+## 4. Samsung-side HCI snoop verification
+
+### 4.1 Locating the Samsung btsnoop log
+
+The expected path:
+
+```text
+/sdcard/btsnoop_hci.log
+```
+
+did not exist.
+
+Because the Android shell on this old Samsung device did not include the `find` command, we manually inspected common paths.
+
+The valid Samsung HCI snoop log was found at:
+
+```text
+/sdcard/Android/data/btsnoop_hci.log
+```
+
+It was copied to Windows as:
+
+```powershell
+.\adb.exe pull /sdcard/Android/data/btsnoop_hci.log .\samsung_btsnoop_plusA7_today.log
+```
+
+The extracted file was:
+
+```text
+samsung_btsnoop_plusA7_today.log
+size: 136908 bytes
+```
+
+This confirmed that Samsung-side HCI logging was working.
+
+---
+
+### 4.2 First Samsung-side filter
+
+The Samsung btsnoop log was analyzed with tshark:
+
+```powershell
+& "C:\Program Files\Wireshark\tshark.exe" -r .\samsung_btsnoop_plusA7_today.log -V | Select-String -Pattern "Read Encryption Key Size|Key Size|Key size|Encryption Change|Connection Complete|Disconnection|Disconnect|Status"
+```
+
+The relevant result was:
+
+```text
+Bluetooth HCI Event - Encryption Change [v1]
+Status: Success
+```
+
+However, no `Read Encryption Key Size` command was visible in the Samsung-side log. The log therefore confirmed that the Samsung saw encryption being enabled, but it did not expose the negotiated key size through HCI. 
+
+Initial conclusion:
+
+```text
+Samsung btsnoop log is valid.
+Samsung sees Encryption Change.
+Samsung does not issue HCI Read Encryption Key Size.
+Therefore Samsung btsnoop is inconclusive for the real value of N.
+```
+
+---
+
+### 4.3 Samsung HCI timeline
+
+A full HCI timeline was extracted with:
+
+```powershell
+& "C:\Program Files\Wireshark\tshark.exe" -r .\samsung_btsnoop_plusA7_today.log -Y "bthci_evt || bthci_cmd" -T fields -e frame.number -e frame.time_relative -e _ws.col.Info > .\samsung_hci_timeline.txt
+```
+
+The important part of the Samsung timeline was:
+
+```text
+633.540771   Rcvd Connect Complete
+633.614990   Rcvd Link Key Request
+633.615600   Sent Link Key Request Reply
+633.658325   Rcvd Encryption Change [v1]
+760.794281   Rcvd Disconnect Complete
+```
+
+This confirms that the Samsung-side log captured the real connection and encryption setup.
+
+However, there was still no:
+
+```text
+Sent Read Encryption Key Size
+Rcvd Command Complete (Read Encryption Key Size)
+```
+
+Therefore the Samsung HCI log could not directly tell us whether `N = 1` or `N = 16`. 
+
+Conclusion:
+
+```text
+Samsung-side HCI logging is valid but inconclusive for key size.
+The Samsung stack did not query the key size through HCI during this test.
+```
+
+---
+
+## 5. RPi vendor diagnostic / btmon validation
+
+Since the Samsung btsnoop log did not expose the key size, we moved to Raspberry Pi-side vendor diagnostics.
+
+The goal was to capture the exact timing of:
+
+```text
+Encryption Change
+Read Encryption Key Size
+```
+
+and determine whether key size 1 appears before or after encryption activation.
+
+---
+
+### 5.1 Baseline vendor diagnostic run
+
+With vendor diagnostics enabled, btmon showed the connection progressing normally.
+
+The key baseline sequence was:
+
+```text
+Encryption Change
+Encryption: Enabled with E0
+Read Encryption Key Size
+Key size: 16
+```
+
+This showed that immediately after encryption was enabled, the RPi controller reported:
+
+```text
+Key size: 16
+```
+
+not 1. 
+
+This is important because the first read after `Encryption Change` is the closest HCI-level observation we have to the encryption setup.
+
+Baseline conclusion:
+
+```text
+Immediately after Encryption Change, the controller reports key size 16.
+```
+
+---
+
+### 5.2 Post-encryption +0xA7 manipulation run
+
+We then performed the critical test:
+
+1. Establish a normal encrypted connection.
+2. Observe `Encryption Change`.
+3. Observe first `Read Encryption Key Size`.
+4. Modify the connection-structure key-size field `+0xA7`.
+5. Read HCI key size again.
+
+The vendor diagnostic log showed the decisive sequence:
+
+```text
+7.516985   Encryption Change
+7.517704   Read Encryption Key Size → Key size: 16
+
+40.384067  Read Encryption Key Size → Key size: 0
+
+50.359434  Read Encryption Key Size → Key size: 1
+```
+
+This proves that:
+
+```text
+Key size 16 appears immediately after encryption is enabled.
+Key size 0 appears much later.
+Key size 1 appears even later.
+```
+
+The altered values `0` and `1` therefore appear tens of seconds after encryption has already been enabled. 
+
+Time differences:
+
+```text
+40.384067 - 7.516985 ≈ 32.87 seconds after Encryption Change
+50.359434 - 7.516985 ≈ 42.84 seconds after Encryption Change
+```
+
+Therefore, in this run, the modified values are definitively post-encryption.
+
+---
+
+## 6. Crucial conclusion about `+0xA7`
+
+The session confirmed the most important result of the project so far:
+
+```text
++0xA7 is not sufficient evidence of real KNOB.
+```
+
+More specifically:
+
+```text
++0xA7 controls the key size reported by InternalBlue and by HCI Read Encryption Key Size.
+```
+
+but:
+
+```text
+directly modifying +0xA7 after encryption is enabled does not prove that the LMP-negotiated N was reduced.
+```
+
+The decisive evidence is:
+
+```text
+Immediately after Encryption Change:
+    HCI reports key size 16
+
+Later, after RAM writes:
+    HCI reports key size 0
+    HCI reports key size 1
+```
+
+This means that the HCI-reported key size is forgeable from RAM.
+
+Therefore, the previous interpretation:
+
+```text
+InternalBlue Effective Key Len = 1
+HCI Read Encryption Key Size = 1
+therefore KNOB succeeded
+```
+
+is no longer valid.
+
+The correct interpretation is:
+
+```text
+InternalBlue/HCI key size can be manipulated after encryption.
+This is a reporting/output manipulation, not proof of real encryption downgrade.
+```
+
+---
+
+## 7. Why this disproves the previous apparent success
+
+The previous apparent success was based on:
+
+```text
+writemem connection_struct + 0xA7 = 01
+        ↓
+InternalBlue shows Effective Key Len = 1
+        ↓
+HCI Read Encryption Key Size returns 1
+```
+
+Today’s vendor diagnostic trace shows that this is not enough.
+
+If `+0xA7` were truly the input to the encryption key-size negotiation, we would expect to see:
+
+```text
+Encryption Change
+Read Encryption Key Size → 1
+```
+
+immediately after encryption setup.
+
+Instead, we observed:
+
+```text
+Encryption Change
+Read Encryption Key Size → 16
+```
+
+and only later:
+
+```text
+Read Encryption Key Size → 0
+Read Encryption Key Size → 1
+```
+
+Thus, `+0xA7` behaves as a post-negotiation field used for reporting.
+
+Final classification:
+
+```text
++0xA7
+→ output/reporting field
+→ controls InternalBlue Effective Key Len display
+→ controls HCI Read Encryption Key Size response
+→ can be forged after encryption
+→ not proven to be an upstream input to LMP N
+```
+
+---
+
+## 8. Search for upstream RAM candidates
+
+After closing the direct `+0xA7` method as a false positive, we tested the remaining clean RAM candidates that had previously been identified as possible upstream key-size sources.
+
+The valid test criterion was:
+
+```text
+Do NOT write +0xA7.
+Write candidate = 1 before connection.
+Connect Samsung.
+Check whether Effective Key Len / HCI key size naturally become 1.
+```
+
+A candidate is only interesting if it makes the final reported key size become 1 **without directly writing the reporting field**.
+
+---
+
+## 9. Candidate 1: `0x203660`
+
+### 9.1 Context
+
+The hexdump around `0x203660` was:
+
+```text
+00203640: ac 95 26 00  26 47 01 00  00 00 c4 09  d8 95 26 00
+00203650: 01 00 00 00  00 00 00 00  00 00 00 00  00 00 00 01
+00203660: 10 00 00 00  06 00 00 00  06 00 00 00  03 00 00 00
+00203670: 00 00 00 00  06 06 06 02  05 01 01 00  20 00 80 00
+```
+
+The candidate field was:
+
+```text
+0x203660 = 10 00 00 00 = 0x00000010
+```
+
+### 9.2 Test
+
+We wrote:
+
+```text
+writemem 0x203660 01 --hex
+```
+
+Then connected the Samsung and checked InternalBlue / HCI.
+
+### 9.3 Result
+
+The connection succeeded, but:
+
+```text
+Effective Key Len remained 16
+HCI key size remained 0x10
+```
+
+Conclusion:
+
+```text
+0x203660 is not an upstream input controlling N.
+```
+
+---
+
+## 10. Candidate 2: `0x20F75C`
+
+### 10.1 Context
+
+The hexdump around `0x20F75C` was:
+
+```text
+0020f730: 06 00 10 18  9f 02 00 00  06 00 10 18  7c 0a 00 00
+0020f740: 06 00 10 18  02 00 00 00  04 00 08 00  04 00 00 00
+0020f750: 04 00 08 00  08 00 00 00  04 00 08 00  10 00 00 00
+0020f760: 04 00 08 00  a4 50 00 00  00 00 10 10  06 0d 00 00
+```
+
+The candidate field was:
+
+```text
+0x20F75C = 10 00 00 00 = 0x00000010
+```
+
+The area looked like a structured numeric table.
+
+### 10.2 Test
+
+We wrote:
+
+```text
+writemem 0x20F75C 01 --hex
+```
+
+Then connected the Samsung.
+
+### 10.3 Result
+
+The connection succeeded, but:
+
+```text
+Effective Key Len remained 16
+HCI key size remained 0x10
+```
+
+Conclusion:
+
+```text
+0x20F75C is not an upstream input controlling N.
+```
+
+---
+
+## 11. Candidate 3: `0x210D1E`
+
+### 11.1 Context
+
+The hexdump around `0x210D00` was:
+
+```text
+00210d00: 00 00 00 00  00 00 00 00  00 00 00 00  00 00 00 00
+00210d10: 00 00 00 00  00 00 00 00  00 00 00 00  10 00 10 00
+00210d20: 00 00 00 00  00 00 00 00  00 00 00 00  00 00 00 00
+...
+```
+
+This was one of the cleanest remaining candidates because the surrounding area was almost entirely zero.
+
+The two fields were:
+
+```text
+0x210D1C = 0x0010
+0x210D1E = 0x0010
+```
+
+We tested the second halfword first:
+
+```text
+0x210D1E
+```
+
+### 11.2 Test
+
+We wrote:
+
+```text
+writemem 0x210D1E 01 --hex
+```
+
+Then connected the Samsung.
+
+### 11.3 Result
+
+The connection succeeded, but:
+
+```text
+Effective Key Len remained 16
+HCI key size remained 0x10
+```
+
+Conclusion:
+
+```text
+0x210D1E is not an upstream input controlling N.
+```
+
+---
+
+## 12. Candidate 4: `0x210D1C`
+
+### 12.1 Test
+
+After `0x210D1E` failed, we tested the paired halfword:
+
+```text
+0x210D1C
+```
+
+We wrote:
+
+```text
+writemem 0x210D1C 01 --hex
+```
+
+Then connected the Samsung.
+
+### 12.2 Result
+
+Again:
+
+```text
+Effective Key Len remained 16
+HCI key size remained 0x10
+```
+
+Conclusion:
+
+```text
+0x210D1C is not an upstream input controlling N.
+```
+
+---
+
+## 13. Final status of remaining clean RAM candidates
+
+At the end of the session, the remaining clean upstream candidates had the following result:
+
+```text
+0x203660  → tested → key size remains 16
+0x20F75C  → tested → key size remains 16
+0x210D1E  → tested → key size remains 16
+0x210D1C  → tested → key size remains 16
+```
+
+Together with previous sessions, this means the static RAM-variable approach is essentially exhausted.
+
+Current conclusion:
+
+```text
+No tested static RAM candidate accessible through RPi5/InternalBlue behaves as an upstream input that forces N = 1.
+```
+
+---
+
+## 14. Overall conclusion of the session
+
+The main result of the session is that the previous apparent KNOB method based on directly writing `+0xA7` is now experimentally disproven as a valid proof of real KNOB.
+
+The strongest evidence is:
+
+```text
+Immediately after Encryption Change:
+    HCI Read Encryption Key Size → 16
+
+Much later, after RAM writes:
+    HCI Read Encryption Key Size → 0
+    HCI Read Encryption Key Size → 1
+```
+
+Therefore:
+
+```text
++0xA7 manipulation is post-encryption reporting manipulation.
+```
+
+It does not demonstrate that the LMP-negotiated entropy `N` was reduced.
+
+Additionally:
+
+```text
+Samsung-side btsnoop confirms encryption but does not expose key size.
+Vendor diagnostic confirms HCI key size 16 immediately after encryption.
+Remaining upstream RAM candidates do not affect key size.
+```
+
+Final technical statement:
+
+```text
+With the current Raspberry Pi 5 / BCM4345C0 / InternalBlue-only setup, we cannot demonstrate a complete KNOB attack equivalent to the public paper/repository implementations.
+```
+
+More precisely:
+
+```text
+The simple writable-RAM-variable approach does not produce a real key-size downgrade.
+The +0xA7 method produces a convincing but invalid HCI/InternalBlue false positive.
+```
+
+---
+
+## 15. What would be required for a real KNOB replication
+
+A complete KNOB replication would require at least one of the following:
+
+```text
+1. LMP-level visibility:
+   Capture LMP_encryption_key_size_req and prove whether N = 1 or N = 16.
+
+2. LMP-level modification:
+   Modify the outgoing or incoming LMP key-size negotiation packet before encryption setup.
+
+3. ROM / patchram access:
+   Locate and patch the firmware function responsible for LMP key-size negotiation.
+
+4. External BR/EDR ciphertext capture:
+   Capture encrypted over-the-air traffic and prove that it can be brute-forced with only 256 candidate keys.
+
+5. A different platform:
+   Use a chipset/firmware where InternalBlue supports LMP hooks, ROM access, or patchram more fully.
+```
+
+Without one of these, we can only modify HCI-visible state, not prove the actual cryptographic downgrade.
+
+---
+
+## 16. Recommended project pivot
+
+Given today’s results, the project should be reframed.
+
+Not:
+
+```text
+We successfully replicated KNOB on RPi5.
+```
+
+But:
+
+```text
+We investigated the feasibility of replicating KNOB on Raspberry Pi 5 / BCM4345C0 and discovered that the apparent key-size downgrade obtained through InternalBlue is a post-encryption HCI reporting false positive.
+```
+
+Possible new project title:
+
+```text
+Experimental Validation of KNOB Replication Limits on Raspberry Pi 5 / BCM4345C0
+```
+
+or:
+
+```text
+From Apparent KNOB Downgrade to HCI Reporting False Positive on BCM4345C0
+```
+
+Core contribution:
+
+```text
+We show that modifying the RPi5 controller RAM can forge HCI Read Encryption Key Size results, including invalid values such as 0 and altered values such as 1, without proving that the real LMP-negotiated encryption entropy was changed.
+```
+
+This is a valid cybersecurity result because it demonstrates the danger of relying only on HCI/InternalBlue output as proof of a link-layer cryptographic downgrade.
+
+---
+
+## 17. Suggested statement for supervisor
+
+A concise version to communicate to the project supervisor:
+
+```text
+During the KNOB replication attempt on Raspberry Pi 5, we initially obtained an apparent downgrade by modifying the InternalBlue Effective Key Len field. However, further validation showed that this field is only a reporting/output field. In the vendor diagnostic trace, immediately after Encryption Change the controller reports Key size = 16. Only later, after RAM writes to the connection structure, HCI Read Encryption Key Size reports altered values such as 0 or 1. Therefore the current method does not prove a real KNOB downgrade.
+
+We then tested the remaining clean RAM candidates that could have acted as upstream key-size inputs, but none caused the negotiated/reported key size to become 1 without directly writing the reporting field. With the current RPi5/InternalBlue-only setup, we therefore cannot complete a full KNOB replication as in the public papers/repositories. Further progress would require LMP-level packet modification, ROM/patchram access, or external ciphertext capture.
+
+We propose to reframe the project as an experimental analysis of why KNOB replication is not achievable with this setup and as a demonstration of an HCI-level false positive in key-size validation.
+```
+
+---
+
+## 18. Final session status
+
+```text
+Direct +0xA7 KNOB claim:
+    closed as false positive
+
+Samsung HCI verification:
+    valid log, encryption visible, key size not exposed
+
+RPi vendor diagnostic:
+    key size 16 immediately after Encryption Change
+    key size 0/1 only later after RAM writes
+
+Static upstream RAM candidates:
+    exhausted among clean candidates tested
+
+Current feasibility:
+    real KNOB not demonstrated with current setup
+
+Next required capability:
+    LMP visibility/modification, ROM/patchram, or ciphertext capture
+```
+
+```
+```
+
+
 ## 2026-05-23 — Session
 
 # KNOB Attack on Raspberry Pi 5 / BCM4345C0: Research Session Report
