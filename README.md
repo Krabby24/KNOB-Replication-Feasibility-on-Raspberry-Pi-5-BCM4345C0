@@ -191,6 +191,7 @@ The final scientific report is available in:
 
 ```text
 report/KNOB_RPi5_BCM4345C0_Report.pdf
+---
 
 ## Reproducibility Notes
 
