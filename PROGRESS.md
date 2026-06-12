@@ -3,7 +3,6 @@
 > **Format:** For each session, add a new entry at the top following the template below.  
 > **Rule:** Never delete old entries. This is a cumulative log.  
 
----
 
 > **Important note on interpretation**
 >
@@ -15,7 +14,7 @@
 >
 > **With the available Raspberry Pi 5 / BCM4345C0 setup, we can demonstrate an HCI/InternalBlue key-size reporting false positive, but not a complete LMP-level KNOB replication.**
 
-
+---
 
 ## Template for new entries
 
