@@ -189,7 +189,7 @@ No tested candidate caused the controller to naturally report a 1-byte key size 
 
 The final scientific report is available in:
 ```text
-report/KNOB_RPi5_BCM4345C0_Report.pdf
+report/From_Apparent_KNOB_Downgrade_to_HCI_Reporting_False_Positive__Experimental_Analysis_on_Raspberry_Pi_5___BCM4345C0.pdf
 ```
 ---
 
