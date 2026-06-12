@@ -3,6 +3,16 @@
 > **Format:** For each session, add a new entry at the top following the template below.  
 > **Rule:** Never delete old entries. This is a cumulative log.
 
+> **Important note on interpretation**
+>
+> This file is a chronological research log. It intentionally preserves the full evolution of the project, including early hypotheses and intermediate interpretations that were later corrected by subsequent experiments.
+>
+> In particular, early entries may describe the `+0xA7` connection-structure field as evidence of a successful KNOB downgrade. Later validation showed that this interpretation was incomplete: `+0xA7` controls the key size reported through InternalBlue and HCI, but it does not prove that the LMP-negotiated entropy value `N` was actually reduced.
+>
+> The final validated conclusion of the project is reported in `README.md` and in the final report:
+>
+> **With the available Raspberry Pi 5 / BCM4345C0 setup, we can demonstrate an HCI/InternalBlue key-size reporting false positive, but not a complete LMP-level KNOB replication.**
+
 ---
 
 ## Template for new entries
