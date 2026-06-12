@@ -1,29 +1,70 @@
-# Captures — can be large, share separately
-captures/*.pcap
-captures/*.log
-captures/*.bin
-
-# InternalBlue artifacts
-*.btsnoop
-btsnoop.log
-memdump_*.bin
-
-# Firmware binaries — not to be redistributed
-*.hcd
-*.bin
-
 # Python
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+*.pyd
+*.egg-info/
 .venv/
 venv/
+env/
 
-# OS
+# OS / editor files
 .DS_Store
 Thumbs.db
-
-# Editor
 .vscode/
 .idea/
 *.swp
+*.swo
+
+# Logs
+*.log
+*.old
+*.tmp
+*.bak
+
+# Bluetooth captures and packet traces
+*.pcap
+*.pcapng
+*.btsnoop
+*btsnoop*
+*lmp_capture*
+*lmp_monitor*
+*btmon*
+
+# Raw memory dumps / firmware dumps
+*.bin
+*.dump
+*.raw
+*.mem
+*.hexdump
+ram_*.txt
+ram_*.log
+bcm4345_ram*
+
+# Large generated artifacts
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# LaTeX / Overleaf build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.lof
+*.lot
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.run.xml
+*.bcf
+
+# Keep final report PDFs allowed
+!report/*.pdf
+
+# Keep documentation markdown files
+!docs/*.md
+!*.md
