@@ -80,15 +80,21 @@ This repository preserves the experimental process, memory-mapping work, validat
 .
 ├── README.md
 ├── PROGRESS.md
+├── LICENSE
+├── .gitignore
 ├── firmware_analysis.md
 ├── vulnerability_table.md
-├── KNOB_PoC_BCM4345C0.py
 ├── hcd_to_bin.py
-└── .gitignore
+├── docs/
+│   ├── false_positive_validation.md
+│   ├── upstream_candidates.md
+│   ├── reproducibility.md
+│   └── ai_disclosure.md
+├── captures/
+│   └── README.md
+└── report/
+    └── From_Apparent_KNOB_Downgrade_to_HCI_Reporting_False_Positive__Experimental_Analysis_on_Raspberry_Pi_5___BCM4345C0.pdf
 ```
-
-This repository is being reorganized for final submission. Some file names may still reflect earlier project phases, when the initial apparent downgrade had not yet been invalidated by the later false-positive analysis.
-
 ---
 
 ## Important Note on PROGRESS.md
