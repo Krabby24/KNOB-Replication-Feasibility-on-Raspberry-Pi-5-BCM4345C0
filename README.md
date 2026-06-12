@@ -219,6 +219,10 @@ This repository is intended for academic research and defensive security analysi
 
 ---
 
+## License
+
+This repository is released under the MIT License. See `LICENSE` for details.
+
 ## AI Assistance Disclosure
 
 AI-based tools were used as support for command-line troubleshooting, code drafting, log interpretation, and writing refinement. All experiments, controller interactions, collected logs, technical decisions, and final conclusions were performed, verified, and critically reviewed by the authors.
