@@ -189,7 +189,6 @@ No tested candidate caused the controller to naturally report a 1-byte key size 
 
 The final scientific report is available in:
 
-```text
 report/KNOB_RPi5_BCM4345C0_Report.pdf
 ---
 
