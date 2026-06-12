@@ -1,166 +1,210 @@
-# KNOB Attack on Raspberry Pi 5 — BCM4345C0
-> CVE-2019-9506 | Bluetooth BR/EDR Key Negotiation Attack  
-> Security of Advanced Networking and Services — Master's Course Project  
-> Authors: **Marco Stocco** & **Riccardo Citron**
+# KNOB Replication Feasibility on Raspberry Pi 5 / BCM4345C0
+
+> Experimental analysis of KNOB attack replication limits on Raspberry Pi 5 / BCM4345C0-CYW43455.
+> University project — Bluetooth BR/EDR security.
+> Authors: Marco Stocco and Riccardo Citron.
 
 ---
 
 ## Overview
 
-This project implements and demonstrates the **KNOB attack (Key Negotiation Of Bluetooth)** on the Cypress BCM4345C0 chip, as found in the Raspberry Pi 3+, 4, and 5.
+This repository documents an experimental feasibility study of the KNOB attack on the Raspberry Pi 5 Bluetooth controller, based on the Broadcom/Cypress BCM4345C0/CYW43455 family.
 
-The KNOB attack forces two Bluetooth BR/EDR devices to negotiate an encryption key with only **1 byte (8 bits) of entropy**, reducing the brute-force keyspace to 256 possible keys. The attack operates at the LMP layer — before the host stack is involved — making it transparent to both victim devices and their operating systems.
+The original objective was to reproduce a complete KNOB-style Bluetooth BR/EDR entropy downgrade, i.e., to force the negotiated encryption key size from 16 bytes to 1 byte. During the project, we initially observed an apparent downgrade: modifying a RAM field at offset `+0xA7` inside the active connection structure caused both InternalBlue and the standard HCI command `Read Encryption Key Size` to report a 1-byte key size.
 
-**Attack platform:** Raspberry Pi 5 (BCM4345C0, chip ID 0x6119, firmware 003.001.025 build 0382)  
-**Framework:** [InternalBlue](https://github.com/seemoo-lab/internalblue)  
-**Reference:** [KNOB Attack — USENIX Security 2019](https://knobattack.com)
+However, later validation showed that this effect is not sufficient evidence of a real KNOB downgrade. In a decisive timing trace, the controller reported `Key size: 16` immediately after `Encryption Change`; altered values such as `0` and `1` appeared only later, after direct RAM writes to the local reporting field.
+
+Therefore, the final conclusion of this project is:
+
+> With the available Raspberry Pi 5 / BCM4345C0 setup, we can demonstrate an HCI/InternalBlue key-size reporting false positive, but not a complete LMP-level KNOB replication.
+
+This repository preserves the experimental process, memory-mapping work, validation traces, tested RAM candidates, and final findings.
+
+---
+
+## Final Result
+
+### What we demonstrated
+
+* The Raspberry Pi 5 / BCM4345C0 controller RAM can be inspected and partially modified through InternalBlue.
+* The active connection structure contains a field at offset `+0xA7` that controls the key size reported by InternalBlue and by HCI `Read Encryption Key Size`.
+* Writing `0x01` to this field can make the local controller report a 1-byte key size.
+* The reported key size can also be changed to invalid values, such as `0`, showing that the HCI-reported value is mutable controller state.
+* Timing validation shows that the first key-size read immediately after `Encryption Change` remains 16 bytes.
+* Therefore, the apparent downgrade is a post-encryption HCI/InternalBlue reporting artifact.
+
+### What we did not demonstrate
+
+* We did not prove that the LMP-negotiated entropy value `N` was reduced to 1.
+* We did not modify LMP key-size negotiation packets before encryption setup.
+* We did not obtain a reliable firmware hook before key derivation.
+* We did not capture over-the-air BR/EDR ciphertext to prove brute-forceability.
+* We do not claim a complete KNOB attack replication with this setup.
+
+---
+
+## Main Contributions
+
+1. **BCM4345C0 connection-structure analysis**
+   We experimentally mapped relevant fields inside the active Bluetooth connection structure.
+
+2. **Identification of the reported key-size field**
+   The field at offset `+0xA7` was identified as the value used by InternalBlue and HCI to report the effective key length.
+
+3. **HCI/InternalBlue false-positive validation**
+   We showed that HCI and InternalBlue can report a 1-byte key size even when this does not prove an LMP-level downgrade.
+
+4. **Timing-based validation**
+   The decisive trace showed:
+
+   ```text
+   Encryption Change
+   Read Encryption Key Size -> 16
+
+   Later, after RAM writes:
+   Read Encryption Key Size -> 0
+   Read Encryption Key Size -> 1
+   ```
+
+5. **Upstream RAM candidate search**
+   We tested multiple RAM candidates that could have acted as upstream key-size inputs. None caused a natural 1-byte key-size result without directly modifying the `+0xA7` reporting field.
+
+6. **Feasibility assessment**
+   We identified the missing capabilities required for a complete KNOB replication on this platform: LMP-level visibility/modification, reliable firmware patching, or external BR/EDR ciphertext capture.
 
 ---
 
 ## Repository Structure
 
-```
-knob-attack-rpi5/
-├── README.md                       # This file
-├── PROGRESS.md                     # Session-by-session progress log
-├── .gitignore
-├── src/
-│   └── KNOB_PoC_BCM4345C0.py       # Main PoC script
-├── docs/
-│   ├── firmware_analysis.md        # BCM4345C0 RAM map findings
-│   └── vulnerability_table.md      # Tested devices and results
-├── captures/                       # btmon/pcap captures (gitignored)
-└── tools/
-    └── hcd_to_bin.py               # HCD firmware extraction utility
+```text
+.
+├── README.md
+├── PROGRESS.md
+├── firmware_analysis.md
+├── vulnerability_table.md
+├── KNOB_PoC_BCM4345C0.py
+├── hcd_to_bin.py
+└── .gitignore
 ```
 
----
-
-## Roadmap
-
-### Phase 0 — Environment Setup ✅ COMPLETED
-- Raspberry Pi 5 setup, InternalBlue installation and Python 3.13 compatibility fixes
-- RAM read/write verified (`hexdump`, `writemem` confirmed working)
-- Chip confirmed: BCM4345C0, Cypress Semiconductor, HCI 5.0
-- `min_encrypt_key_size` kernel parameter override confirmed working
-
-### Phase 1 — Firmware Analysis ✅ COMPLETED
-- ROM dump blocked by hardware protection on RPi 5 (Spectra mitigations prevent writeRAM in ROM range, error 0x12). RAM range 0x200000–0x227FFF fully readable.
-- **Original finding:** key length field offset within connection struct = `+0xA7` (universally confirmed on all 5 tested devices)
-- **Original finding:** `key_len_addr` for slot 0 (Samsung, iPhone) = `0x20557F`; slot 1 (iPhone 6S) = `0x2056CF`
-- **Original finding:** complete BCM4345C0 connection struct RAM map — see `docs/firmware_analysis.md`
-- Global entropy variable: not found (requires ROM access)
-
-### Phase 2 — PoC Development ✅ COMPLETED
-- `KNOB_PoC_BCM4345C0.py` written and functional
-- Uses `writemem` to patch `effective_key_len` field at `slot_base + 0xA7`
-- Tested against 5 real Bluetooth devices
-
-### Phase 3 — Attack Execution ✅ COMPLETED
-- KNOB attack demonstrated on **5 real devices** — see vulnerability table below
-- LMP traffic captured with `btmon` for all sessions
-- `Read Encryption Key Size` host blindness demonstrated (host reads 16, firmware uses 1)
-- E0 encryption confirmed on all BR/EDR devices via btmon
-
-### Phase 4 — Cryptographic Key Derivation 🔄 IN PROGRESS
-- E1 verified: SRES and ACO computed from KL+AU_RAND+BTADD_S and confirmed against captured LMP_sres packets — **3 independent sessions**
-- EN_RAND not extractable via software on BCM4345C0 — documented as original finding
-- KC not persistently stored in accessible RAM after E3 computation — documented
-- **Remaining:** complete K'C derivation using synthetic EN_RAND (following KNOB paper methodology, Section 4.3); generate all 256 K'C candidates for brute force demonstration
-
-### Phase 5 — Original Contributions ✅ SUBSTANTIALLY COMPLETED
-- Extended vulnerability table: 5 devices including **iPhone 16 Pro (2024)**, **MacBook 2022** and **iPad A16 2026**— not in original KNOB paper
-- BCM4345C0 RAM map fully documented with cryptographic proof
-- EN_RAND non-extractability documented as security finding
-- AES-CCM vulnerability confirmed on modern Apple devices
-
-### Phase 6 — Documentation & Repository ⏳ IN PROGRESS
-- PROGRESS.md maintained session-by-session
-- Final README, demo video, and public repository release pending Phase 4 completion
+This repository is being reorganized for final submission. Some file names may still reflect earlier project phases, when the initial apparent downgrade had not yet been invalidated by the later false-positive analysis.
 
 ---
 
-## Vulnerability Table
+## Important Note on PROGRESS.md
 
-| Device | BD Address | Encryption | Vulnerable | `key_len_addr` | RPi Role | Notes |
-|---|---|---|---|---|---|---|
-| JBL Clip 2 | 40:EF:4C:8C:88:DF | E0 | ✅ | variable | Master | slot variable |
-| Samsung Galaxy Ace Style 2014 | F8:84:F2:62:96:AA | E0 | ✅ | `0x20557F` | Slave | slot stable, KL stable |
-| Samsung Galaxy A34 5G (2024) | AC:80:FB:21:85:32 | E0 | ✅ | `0x20557F` | Slave | slot stable |
-| iPhone 6S | 00:B3:62:93:89:12 | E0 | ✅ | `0x2056CF` | Slave | slot 1 |
-| **iPhone 16 Pro (2024)** | 90:B7:90:09:34:92 | AES-CCM | ✅ | `0x20557F` | Slave | **Secure Connections — original finding** |
-| **MacBook 2022** | a8:8f:d9:35:0c:fe | AES-CCM | ✅ | `0x20557F` | Slave | **Secure Connections — original finding** |
-| **iPad A16 (iPadOS 26)** | 30:C0:AE:2D:B4:BE | AES-CCM | ✅ | 0x20557F | Slave | **Secure Connections - original finding** |
+`PROGRESS.md` is a chronological research log. It intentionally preserves the full evolution of the project, including early interpretations that were later corrected.
+
+Some older entries may describe the `+0xA7` method as a successful KNOB downgrade. Those entries should be read historically. The final validated conclusion is the one stated in this README and in the final report:
+
+> `+0xA7` controls HCI/InternalBlue reporting, but does not prove a real LMP-level KNOB downgrade.
 
 ---
 
-## Original Findings — BCM4345C0
+## Experimental Setup
 
-All findings below are original contributions not previously published for this chip.
+Main setup:
 
-### 1. Connection Struct RAM Map (cryptographically verified)
+```text
+Attacker-controlled platform: Raspberry Pi 5
+Bluetooth controller: BCM4345C0 / CYW43455 family
+Framework: InternalBlue
+Main target: Samsung Galaxy Ace Style 2014
+Target BD address: F8:84:F2:62:96:AA
+Linux tools: btmon, hcitool, bluetoothctl, l2ping
+Windows tools: ADB, Wireshark, tshark
+Target-side logging: Android Bluetooth HCI snoop log
+```
 
-| Offset from `slot_base` | Size | Content |
-|---|---|---|
-| `+0x60` | 16B | KL (Link Key) |
-| `+0x70` | 16B | AU_RAND |
-| `+0x80` | 4B | SRES |
-| `+0x84` | 12B | ACO |
-| `+0xA7` | 1B | **Effective Key Length** ← attack target |
-
-Verified with `SRES, ACO = E1(KL, AU_RAND, BTADD_S)` against 3 independent sessions. Full mathematical proof in `docs/firmware_analysis.md`.
-
-### 2. Key Finding: `+0xA7` Offset Universal on BCM4345C0
-The `effective_key_len` field is always at `slot_base + 0xA7` regardless of: remote device type, encryption mode (E0 or AES-CCM), master/slave role, iOS/Android/Linux host, or device year (2014–2024).
-
-### 3. Scratch Area / E3 Working Memory at `0x21D244`
-A 320-byte zone (`0x21D244–0x21D384`) identified as the E3/SAFER+ working area. AU_RAND appears here transiently during encryption setup. Contents change completely per session with high entropy. First published identification of this zone.
-
-### 4. Second AU_RAND Copy at `0x21DBF0`
-AU_RAND is staged at a fixed address `0x21DBF0` outside the connection struct. Stable across sessions, changes with each new connection.
-
-### 5. EN_RAND Not Extractable via Software
-EN_RAND is generated and consumed internally by the BCM4345C0 firmware during E3 computation in a few milliseconds. It is never exposed to the HCI host, not persistently stored in accessible RAM, and not capturable via BlueZ `vendor_diag`, InternalBlue LMP monitor, btsnoop, or any tested software method. KC is similarly not persistent after E3. This is documented as a security finding: the firmware design prevents session key extraction even on a KNOB-vulnerable chip.
-
-### 6. iPhone 16 Pro (2024) with AES-CCM Vulnerable
-The KNOB attack succeeds on iPhone 16 Pro using AES-CCM (Secure Connections), demonstrating that the vulnerability extends to current Apple devices 7 years after the original disclosure. With L=1 and AES-CCM, the 256 K'C candidates are `0xXX00...00` (trivial brute force).
-
-### 7. `Public RAND` in InternalBlue = AU_RAND (not EN_RAND)
-The `Public RAND` field shown by InternalBlue's `info connections` is AU_RAND, not EN_RAND as incorrectly assumed in all informal writeups referencing InternalBlue. Confirmed by cross-referencing with captured LMP_au_rand packets.
+The Raspberry Pi acted as the controlled Bluetooth peer. The Samsung device acted as the target. The experiments were performed through local controller RAM inspection, HCI tracing, target-side HCI snoop logging, and timing analysis.
 
 ---
 
-## Key Technical Values — BCM4345C0
+## Key Experimental Evidence
 
-| Symbol | Value | Source |
-|---|---|---|
-| `CONNECTION_ARRAY_ADDRESS` | `0x204BA8` | fw_0x6119.py |
-| `CONNECTION_STRUCT_LENGTH` | `0x150` | fw_0x6119.py |
-| Key length offset in struct | `+0xA7` | **Found by us** |
-| `key_len_addr` slot 0 | `0x20557F` | **Found by us** |
-| `key_len_addr` slot 1 | `0x2056CF` | **Found by us** |
-| Accessible RAM range | `0x200000–0x227FFF` | **Found by us** |
-| E3 scratch area | `0x21D244–0x21D384` | **Found by us** |
-| AU_RAND staging address | `0x21DBF0` | **Found by us** |
-| Samsung Ace 2014 KL | `f28bc3dc14fc8432aafbab1a4bc44c26` | **Found by us** |
-| iPhone 6S KL | `877779624ab464c66a93c4092608b255` | **Found by us** |
+The critical validation trace showed:
 
----
+```text
+7.516985   Encryption Change
+7.517704   Read Encryption Key Size -> Key size: 16
 
-## BCM4345C0 Hardware Constraints
+40.384067  Read Encryption Key Size -> Key size: 0
 
-**ROM**: Not accessible via InternalBlue on RPi 5. Both readMem and writeRAM return error 0x12 for addresses below 0x1F0000. This is a hardware-level protection (Spectra mitigations) blocking both read and write access to ROM. Not present on RPi 3+ or RPi 4.
+50.359434  Read Encryption Key Size -> Key size: 1
+```
 
-**RAM:** Fully readable and writable in range `0x200000–0x227FFF` (163,840 bytes). `writemem` works correctly — confirmed by KNOB attack on 5 devices.
+Interpretation:
 
-**Patchram:** Functional. `writemem` patches survive for the duration of a connection and are reset on reconnection or reboot.
+* Immediately after encryption is enabled, the controller reports 16 bytes.
+* Values `0` and `1` appear only tens of seconds later.
+* Those values are observed after direct RAM writes to the reporting field.
+* Therefore, the observed 1-byte report is post-encryption reporting manipulation, not proof that the LMP negotiation used `N = 1`.
 
 ---
 
-## References
+## Upstream Candidate Search
 
-- [KNOB Attack Paper — USENIX Security 2019](https://www.usenix.org/conference/usenixsecurity19/presentation/antonioli)
-- [francozappa/knob — Original PoC](https://github.com/francozappa/knob)
-- [seemoo-lab/internalblue](https://github.com/seemoo-lab/internalblue)
-- [Polypyus — Binary Diffing Tool](https://github.com/seemoo-lab/polypyus)
-- [InternalBlue: The Perfect Bluetooth Research Device (Classen, 2021)](https://naehrdine.blogspot.com/2021/02/internalblue-perfect-bluetooth-research.html)
+After identifying `+0xA7` as a reporting field, we searched for upstream RAM fields that could influence the key-size negotiation before encryption setup.
+
+The tested candidates included, among others:
+
+```text
+0x2002A8
+0x2002CC
+0x206484
+0x20EBC0
+0x20EBC2
+0x201FE8
+0x20360C
+0x208A64
+0x200704
+0x201858
+0x203660
+0x20F75C
+0x210D1E
+0x210D1C
+```
+
+No tested candidate caused the controller to naturally report a 1-byte key size without directly modifying the `+0xA7` reporting field.
+
+---
+
+## Current Status
+
+| Question                                          | Result |
+| ------------------------------------------------- | ------ |
+| Can we modify the local reported key size?        | Yes    |
+| Can InternalBlue report 1 byte?                   | Yes    |
+| Can HCI `Read Encryption Key Size` report 1 byte? | Yes    |
+| Is this sufficient proof of KNOB?                 | No     |
+| Did we observe LMP negotiating `N = 1`?           | No     |
+| Did we capture BR/EDR ciphertext for brute force? | No     |
+| Did we identify a working upstream RAM input?     | No     |
+| Did we demonstrate a complete KNOB replication?   | No     |
+| Did we identify a reporting false positive?       | Yes    |
+
+---
+
+## Reproducibility Notes
+
+The experiments require:
+
+* Raspberry Pi 5 with onboard BCM4345C0/CYW43455 Bluetooth controller;
+* InternalBlue configured for the local controller;
+* Linux Bluetooth tools (`btmon`, `hcitool`, `bluetoothctl`, `l2ping`);
+* a BR/EDR target device;
+* optional Android HCI snoop logging for target-side validation.
+
+This repository does not provide a turnkey KNOB exploit. The scripts and notes are intended to document the experimental process and the feasibility analysis.
+
+---
+
+## Ethical and Safety Notice
+
+This repository is intended for academic research and defensive security analysis. The experiments were performed on devices under our control. The repository does not provide a complete working KNOB exploit and should not be used to attack third-party devices.
+
+---
+
+## AI Assistance Disclosure
+
+AI-based tools were used as support for command-line troubleshooting, code drafting, log interpretation, and writing refinement. All experiments, controller interactions, collected logs, technical decisions, and final conclusions were performed, verified, and critically reviewed by the authors.
